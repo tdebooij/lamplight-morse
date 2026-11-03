@@ -2,7 +2,7 @@
 // Usage: node test/sim.mjs
 import { readFileSync } from 'node:fs'
 
-const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+const html = readFileSync(process.env.FILE || new URL('../index.html', import.meta.url), 'utf8')
 const core = html.slice(html.indexOf('/* CORE START'), html.indexOf('/* CORE END */'))
 const { encode, Decoder, Detector, unitFromWpm } = new Function(`${core}; return { encode, Decoder, Detector, unitFromWpm }`)()
 
@@ -32,7 +32,7 @@ function simulate(text, o) {
     const x = o.ambient + o.peak * onFraction(ft - o.exposure * dt, ft)
     y += (x - y) * o.lag // exposure / sensor lag
     const v = Math.max(0, Math.min(255, y + gauss() * o.noise))
-    const edge = det.push(v, ft, 28)
+    const edge = det.push(v, ft, 36)
     if (edge) dec.edge(edge.on, edge.t)
     dec.tick(ft)
   }
@@ -53,7 +53,7 @@ const scenarios = {
   // Informational: at 10 WPM a dot is ~2 camera frames after torch lag, so misses are expected
   'fast sender 10wpm 30fps':     { wpm: 10, latOn: 40, latOff: 10, jit: 15, lag: 0.6, info: true },
 }
-const texts = ['HELLO WORLD', 'SOS', 'THE QUICK BROWN FOX 123', 'TIM MET EVE', 'MORSE CODE TEST']
+const texts = ['HELLO WORLD', 'SOS', 'THE QUICK BROWN FOX 123', 'TIM MET EVE', 'WHERE ARE YOU?', 'OK, FINE.', 'IS IT 5:30?']
 
 let allOk = true
 for (const [name, over] of Object.entries(scenarios)) {

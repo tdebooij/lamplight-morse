@@ -88,6 +88,7 @@ input[type="range"] { width: 100%; accent-color: var(--lamp); }
 .viewer video { width: 100%; height: 100%; display: block; object-fit: fill; }
 .viewer .empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 20px; font-size: 14px; }
 .target { position: absolute; border: 2px solid rgba(255,255,255,.7); border-radius: 6px; transform: translate(-50%, -50%); pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,.35); transition: border-color .05s; }
+.target.searching { border-style: dashed; border-color: rgba(255,255,255,.4); box-shadow: none; }
 .target.on { border-color: var(--lamp); box-shadow: 0 0 0 9999px rgba(0,0,0,.35), 0 0 18px var(--lamp); }
 .hint { position: absolute; left: 8px; bottom: 8px; font: 11px var(--f-mono); color: #fff; background: rgba(0,0,0,.55); padding: 3px 7px; border-radius: 4px; pointer-events: none; }
 
@@ -168,7 +169,14 @@ details .card { margin-top: 4px; }
         <video id="video" playsinline muted></video>
         <div class="target" id="target" hidden></div>
         <div class="empty" id="viewer-empty">Point the camera at the other phone's light.<br>Works with a laptop webcam too.</div>
-        <div class="hint" id="hint" hidden>Tap to aim at the light</div>
+        <div class="hint" id="hint" hidden></div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <span class="lbl">Aim</span>
+        <div class="seg" id="aim">
+          <button id="aim-auto" data-aim="auto" aria-pressed="true">Auto</button>
+          <button id="aim-manual" data-aim="manual" aria-pressed="false">Tap to aim</button>
+        </div>
       </div>
       <canvas class="graph" id="graph" width="600" height="140" aria-label="Brightness over the last 4 seconds"></canvas>
       <div class="stats">
@@ -203,12 +211,12 @@ details .card { margin-top: 4px; }
           <select id="cam"><option value="">Default (back camera)</option></select>
         </div>
         <div class="field">
-          <div class="row" style="justify-content:space-between"><label class="lbl" for="tsize">Target size</label><span class="val" id="tsize-val"></span></div>
-          <input id="tsize" type="range" min="6" max="60" step="1" value="20">
+          <div class="row" style="justify-content:space-between"><label class="lbl" for="tsize">Tap-to-aim box size</label><span class="val" id="tsize-val"></span></div>
+          <input id="tsize" type="range" min="10" max="80" step="1" value="35">
         </div>
         <div class="field">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="sens">Min. contrast</label><span class="val" id="sens-val"></span></div>
-          <input id="sens" type="range" min="8" max="120" step="1" value="28">
+          <input id="sens" type="range" min="8" max="120" step="1" value="36">
         </div>
         <div class="field">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="rwpm">Expected speed (adapts automatically)</label><span class="val" id="rwpm-val"></span></div>
@@ -280,13 +288,16 @@ function encode(text, prosign = false) {
 }
 
 /* Detector: turns per-frame brightness into on/off edges.
-   Threshold sits halfway between the darkest and brightest value of the last few seconds. */
+   The threshold sits halfway between the darkest and brightest value of the last few seconds.
+   Each frame is judged a few frames late (LOOK), so the window already holds the frames after it:
+   the first flash is judged against its full brightness, and a borderline frame can be confirmed
+   by the next one. Edge times are placed inside the frame from how bright the frame was. */
 class Detector {
   constructor() { this.reset(); }
-  reset() { this.win = []; this.state = false; this.cand = null; this.candN = 0; this.candT = 0; this.peak = 0; this.peakT = 0; }
+  reset() { this.win = []; this.state = false; this.peak = 0; this.peakT = 0; this.info = { lo: 0, hi: 0, range: 0, minC: 0 }; }
   // Returns the edge {on, t} when the state changes, else null. this.info holds lo/hi/range for display.
   push(v, t, minContrast) {
-    const win = this.win;
+    const LOOK = 3, win = this.win;
     win.push({ t, v, on: this.state });
     while (win.length && win[0].t < t - 5000) win.shift();
     let lo = 255, hi = 0;
@@ -297,17 +308,27 @@ class Detector {
     this.peak = Math.max(range, this.peak * 2 ** (-(t - this.peakT) / 10000)); this.peakT = t;
     const need = Math.max(minContrast, this.peak * 0.6);
     this.info = { lo, hi, range, minC: need };
-    let raw = false;
-    if (range >= need) { const f = (v - lo) / range; raw = this.state ? f > 0.42 : f > 0.58; }
+    const i = win.length - 1 - LOOK;
+    if (i < 1) return null;
+    const p = win[i], prev = win[i - 1], next = win[i + 1];
+    const f = x => range >= need ? (x.v - lo) / range : 0;
     let edge = null;
-    if (raw !== this.state) {
-      // One frame is enough when it's clearly past the threshold; a borderline frame needs a second one
-      const f = range ? (v - lo) / range : 0;
-      const clear = raw ? f > 0.7 : f < 0.3;
-      if (this.cand === raw) this.candN++; else { this.cand = raw; this.candN = 1; this.candT = t; }
-      if (clear || this.candN >= 2) { this.state = raw; this.cand = null; edge = { on: raw, t: this.candT }; }
-    } else this.cand = null;
-    win[win.length - 1].on = this.state;
+    const want = this.state ? f(p) > 0.45 : f(p) > 0.55;
+    if (want !== this.state) {
+      // Clearly past the threshold, or confirmed by the next frame
+      const clear = want ? f(p) > 0.7 : f(p) < 0.3;
+      const confirmed = want ? f(next) > 0.55 : f(next) < 0.45;
+      if (clear || confirmed) {
+        this.state = want;
+        // A frame's brightness is the share of its exposure the light was on: place the edge accordingly.
+        // If the previous frame was already partway, the switch happened during that frame instead.
+        const share = x => clamp(want ? f(x) : 1 - f(x), 0, 1);
+        const at = share(prev) > 0.2 ? prev : p;
+        const before = at === prev ? win[i - 2] || prev : prev;
+        edge = { on: want, t: at.t - share(at) * (at.t - before.t) };
+      }
+    }
+    for (let k = i; k < win.length; k++) win[k].on = this.state;
     return edge;
   }
 }
@@ -337,6 +358,11 @@ class Decoder {
     if (this.on || this.since === null || !this.durs.length) return;
     this.tail = t - this.since;
     this.decode();
+  }
+  // Throw away the transmission in progress (e.g. it came from a different light)
+  discard() {
+    this.durs = []; this.tail = 0; this.on = false; this.since = null;
+    this.text = this.committed; this.sym = '';
   }
   flush() {
     if (this.durs.length) { this.tail = 1e9; this.decode(); }
@@ -595,13 +621,26 @@ const sampler = document.createElement('canvas'); sampler.width = sampler.height
 const sctx = sampler.getContext('2d', { willReadFrequently: true });
 const rx = {
   running: false, stream: null, track: null,
-  target: { x: 0.5, y: 0.5, size: 0.2 },
+  target: { x: 0.5, y: 0.5, size: 0.35 },
+  aim: 'auto', grid: null, cell: -1,
   det: new Detector(),
   frames: 0, fpsT: 0, fps: 0, lastRender: '',
   decoder: new Decoder(unitFromWpm(5)),
 };
 
 function placeTarget() {
+  if (rx.aim === 'auto') {
+    const g = rx.grid;
+    targetEl.classList.toggle('searching', !g || rx.cell < 0);
+    if (!g || rx.cell < 0) { Object.assign(targetEl.style, { left: '50%', top: '50%', width: '96%', height: '96%' }); return; }
+    const col = rx.cell % g.cols, row = Math.floor(rx.cell / g.cols);
+    Object.assign(targetEl.style, {
+      left: (col + 0.5) / g.cols * 100 + '%', top: (row + 0.5) / g.rows * 100 + '%',
+      width: 100 / g.cols + '%', height: 100 / g.rows + '%',
+    });
+    return;
+  }
+  targetEl.classList.remove('searching');
   const vw = video.videoWidth || 4, vh = video.videoHeight || 3;
   const m = Math.min(vw, vh) * rx.target.size;
   Object.assign(targetEl.style, {
@@ -614,10 +653,69 @@ viewer.addEventListener('pointerdown', e => {
   const r = viewer.getBoundingClientRect();
   rx.target.x = clamp((e.clientX - r.left) / r.width, 0, 1);
   rx.target.y = clamp((e.clientY - r.top) / r.height, 0, 1);
-  rx.det.reset(); // new spot, new baseline
-  placeTarget();
-  $('hint').hidden = true;
+  setAim('manual');
 });
+function setAim(a) {
+  rx.aim = a; rx.cell = -1; rx.det.reset(); // new spot, new baseline
+  document.querySelectorAll('#aim button').forEach(b => b.setAttribute('aria-pressed', b.dataset.aim === a));
+  $('hint').textContent = a === 'auto' ? 'Auto-aim: finds the blinking light' : 'Tap again to move the box';
+  placeTarget();
+}
+document.querySelectorAll('#aim button').forEach(b => b.onclick = () => setAim(b.dataset.aim));
+
+// Auto-aim: split the whole view into a grid, track each cell's brightness,
+// and lock onto the cell that blinks hardest. Another cell must blink 1.5× harder to take over.
+const GRID_W = 320;
+const full = document.createElement('canvas');
+const fctx = full.getContext('2d', { willReadFrequently: true });
+function sampleGrid(t) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const W = GRID_W, H = Math.round(GRID_W * vh / vw);
+  let g = rx.grid;
+  if (!g || g.W !== W || g.H !== H) {
+    full.width = W; full.height = H;
+    const cols = 10, rows = Math.max(3, Math.round(H / 32)), n = cols * rows;
+    g = rx.grid = {
+      W, H, cols, rows,
+      colOf: Uint8Array.from({ length: W }, (_, x) => Math.min(cols - 1, Math.floor(x * cols / W))),
+      rowOf: Uint8Array.from({ length: H }, (_, y) => Math.min(rows - 1, Math.floor(y * rows / H))),
+      hist: new Uint16Array(n * 256), vals: new Float32Array(n), scores: new Float32Array(n),
+      hists: Array.from({ length: n }, () => []),
+    };
+    rx.cell = -1;
+  }
+  fctx.drawImage(video, 0, 0, W, H);
+  const d = fctx.getImageData(0, 0, W, H).data;
+  g.hist.fill(0);
+  for (let y = 0, i = 0; y < H; y++) {
+    const r = g.rowOf[y] * g.cols;
+    for (let x = 0; x < W; x++, i += 4) g.hist[(r + g.colOf[x]) * 256 + ((d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8)]++;
+  }
+  const K = 12; // brightness of a cell = mean of its 12 brightest pixels, so a small light still counts
+  let best = -1, bestScore = 0;
+  for (let c = 0; c < g.vals.length; c++) {
+    let sum = 0, cnt = 0;
+    for (let v = 255, base = c * 256; v >= 0 && cnt < K; v--) { const h = g.hist[base + v]; if (h) { const take = Math.min(h, K - cnt); sum += take * v; cnt += take; } }
+    const val = g.vals[c] = sum / cnt;
+    const hs = g.hists[c];
+    hs.push({ t, v: val });
+    while (hs[0].t < t - 3000) hs.shift();
+    let lo = 255, hi = 0;
+    for (const p of hs) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+    const score = g.scores[c] = hi - lo;
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  const current = rx.cell >= 0 ? g.scores[rx.cell] : 0;
+  if (best >= 0 && best !== rx.cell && bestScore >= +$('sens').value && bestScore > current * 1.5) {
+    rx.cell = best;
+    rx.decoder.discard();
+    rx.det.reset();
+    rx.det.win = g.hists[best].slice(0, -1).map(p => ({ t: p.t, v: p.v, on: false }));
+    placeTarget();
+  }
+  return rx.cell >= 0 ? g.vals[rx.cell] : null;
+}
 
 // Brightness of the target patch: mean of the brightest 10% of pixels, so a small light still counts
 function sample() {
@@ -676,8 +774,11 @@ function renderDecoded() {
 function frame(now, meta) {
   if (!rx.running) return;
   const t = (meta && meta.captureTime) || performance.now();
-  const v = sample();
-  if (v !== null) {
+  const v = rx.aim === 'auto' ? sampleGrid(t) : sample();
+  if (v === null) {
+    rx.decoder.tick(t);
+    $('st-sig').textContent = 'searching';
+  } else {
     const info = detect(v, t);
     rx.frames++;
     if (t - rx.fpsT > 1000) { rx.fps = Math.round(rx.frames * 1000 / (t - rx.fpsT)); rx.frames = 0; rx.fpsT = t; }
@@ -730,7 +831,7 @@ async function startRx(deviceId) {
   rx.running = true; rx.det.reset(); rx.frames = 0; rx.fpsT = performance.now();
   rx.decoder.flush();
   $('viewer-empty').hidden = true; targetEl.hidden = false; $('hint').hidden = false;
-  placeTarget();
+  rx.grid = null; setAim(rx.aim);
   $('rx-start').disabled = true; $('rx-stop').disabled = false;
   setStatus(rxStatus, 'Listening. Aim the box at the light.', 'ok');
   keepAwake(true);
