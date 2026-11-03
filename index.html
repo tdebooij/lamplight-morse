@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Lamplight Morse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one narrow column with two tabs (Send / Receive); controls stacked for one-handed phone use at night */
+:root {
+  --bg: #0c1016;
+  --panel: #141a23;
+  --line: #273140;
+  --fg: #e7ebf0;
+  --muted: #8a96a7;
+  --lamp: #ffb21a;
+  --lamp-ink: #1c1300;
+  --ok: #46c487;
+  --err: #ff7070;
+  --f-display: "Saira Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.5 var(--f-body);
+  padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  -webkit-tap-highlight-color: transparent;
+}
+.wrap { max-width: 560px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font: 700 30px/1 var(--f-display); letter-spacing: .02em; margin: 0; text-transform: uppercase; }
+h1 span { color: var(--lamp); }
+.tagline { color: var(--muted); font: 12px var(--f-mono); letter-spacing: .08em; }
+
+.tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px; gap: 4px; }
+.tabs button { font: 600 16px var(--f-display); text-transform: uppercase; letter-spacing: .08em; padding: 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--lamp); color: var(--lamp-ink); }
+
+section { display: grid; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 12px; }
+label.lbl, .lbl { font: 500 11px var(--f-mono); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+textarea, select {
+  width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+  font: 18px/1.4 var(--f-body); padding: 10px 12px;
+}
+select { font-size: 14px; }
+textarea { resize: vertical; min-height: 72px; text-transform: uppercase; }
+textarea:focus, select:focus, button:focus-visible, input:focus-visible { outline: 2px solid var(--lamp); outline-offset: 2px; }
+
+.morse { font: 15px/1.9 var(--f-mono); color: var(--muted); word-break: break-word; min-height: 1.9em; }
+.morse .c { padding: 0 1px; border-radius: 3px; }
+.morse .c.active { background: var(--lamp); color: var(--lamp-ink); }
+.morse .c.done { color: var(--fg); }
+.morse .sep { color: var(--line); padding: 0 4px; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row > .grow { flex: 1 1 160px; min-width: 0; }
+.field { display: grid; gap: 6px; }
+input[type="range"] { width: 100%; accent-color: var(--lamp); }
+.val { font: 500 13px var(--f-mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.seg { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--muted); font: 500 14px var(--f-body); padding: 8px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--line); color: var(--fg); }
+
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.check input { accent-color: var(--lamp); width: 18px; height: 18px; }
+
+.btn { font: 600 17px var(--f-display); text-transform: uppercase; letter-spacing: .08em; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--fg); padding: 12px 18px; cursor: pointer; }
+.btn.primary { background: var(--lamp); color: var(--lamp-ink); border-color: var(--lamp); }
+.btn.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btns { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; }
+.btns.two { grid-template-columns: 1fr 1fr; }
+
+.status { font: 13px var(--f-mono); color: var(--muted); min-height: 1.5em; }
+.status.err { color: var(--err); }
+.status.ok { color: var(--ok); }
+
+.viewer { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; touch-action: manipulation; cursor: crosshair; }
+.viewer video { width: 100%; height: 100%; display: block; object-fit: fill; }
+.viewer .empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 20px; font-size: 14px; }
+.target { position: absolute; border: 2px solid rgba(255,255,255,.7); border-radius: 6px; transform: translate(-50%, -50%); pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,.35); transition: border-color .05s; }
+.target.on { border-color: var(--lamp); box-shadow: 0 0 0 9999px rgba(0,0,0,.35), 0 0 18px var(--lamp); }
+.hint { position: absolute; left: 8px; bottom: 8px; font: 11px var(--f-mono); color: #fff; background: rgba(0,0,0,.55); padding: 3px 7px; border-radius: 4px; pointer-events: none; }
+
+canvas.graph { width: 100%; height: 70px; display: block; background: var(--bg); border-radius: 6px; border: 1px solid var(--line); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.stat { display: grid; gap: 2px; }
+.stat b { font: 500 16px var(--f-mono); font-variant-numeric: tabular-nums; }
+
+.decoded { font: 600 26px/1.3 var(--f-display); letter-spacing: .06em; min-height: 2.6em; word-break: break-word; }
+.decoded .pending { color: var(--lamp); font: 500 18px var(--f-mono); letter-spacing: 0; }
+.decoded .placeholder { color: var(--muted); font: 400 15px var(--f-body); letter-spacing: 0; }
+
+details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+details[open] summary { margin-bottom: 10px; }
+details .card { margin-top: 4px; }
+
+/* Full-screen lamp for the screen-flash mode */
+.lamp { position: fixed; inset: 0; z-index: 50; background: #000; display: grid; place-items: end center; padding-bottom: max(24px, env(safe-area-inset-bottom, 0px)); }
+.lamp.on { background: #fff; }
+.lamp .lamp-ui { display: grid; gap: 10px; justify-items: center; }
+.lamp .lamp-ui span { font: 13px var(--f-mono); color: #777; mix-blend-mode: difference; }
+.lamp .btn { background: rgba(40,40,40,.85); color: #fff; border-color: #555; }
+
+@media (prefers-reduced-motion: reduce) { .target { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Lamp<span>light</span></h1>
+    <div class="tagline">·−·· ·− −− ·−−· · MORSE BY LIGHT</div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button id="tab-send" role="tab" aria-selected="true" aria-controls="panel-send">Send</button>
+    <button id="tab-recv" role="tab" aria-selected="false" aria-controls="panel-recv">Receive</button>
+  </div>
+
+  <!-- SEND -->
+  <section id="panel-send" role="tabpanel">
+    <div class="card">
+      <label class="lbl" for="msg">Message</label>
+      <textarea id="msg" rows="2" spellcheck="false" autocomplete="off">HELLO WORLD</textarea>
+      <div class="morse" id="morse" aria-live="off"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div class="field grow">
+          <div class="row" style="justify-content:space-between"><label class="lbl" for="wpm">Speed</label><span class="val" id="wpm-val"></span></div>
+          <input id="wpm" type="range" min="3" max="20" step="1" value="6">
+        </div>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <div class="field">
+          <span class="lbl">Light source</span>
+          <div class="seg" id="mode">
+            <button id="mode-torch" data-mode="torch" aria-pressed="true">Flashlight</button>
+            <button id="mode-screen" data-mode="screen" aria-pressed="false">Screen</button>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="repeat"> Repeat</label>
+      </div>
+    </div>
+
+    <div class="btns">
+      <button class="btn primary" id="send">Send</button>
+      <button class="btn" id="sos">SOS</button>
+      <button class="btn danger" id="stop" disabled>Stop</button>
+    </div>
+    <div class="status" id="send-status"></div>
+  </section>
+
+  <!-- RECEIVE -->
+  <section id="panel-recv" role="tabpanel" hidden>
+    <div class="card">
+      <div class="viewer" id="viewer">
+        <video id="video" playsinline muted></video>
+        <div class="target" id="target" hidden></div>
+        <div class="empty" id="viewer-empty">Point the camera at the other phone's light.<br>Works with a laptop webcam too.</div>
+        <div class="hint" id="hint" hidden>Tap to aim at the light</div>
+      </div>
+      <canvas class="graph" id="graph" width="600" height="140" aria-label="Brightness over the last 4 seconds"></canvas>
+      <div class="stats">
+        <div class="stat"><span class="lbl">Signal</span><b id="st-sig">–</b></div>
+        <div class="stat"><span class="lbl">Contrast</span><b id="st-con">–</b></div>
+        <div class="stat"><span class="lbl">Speed</span><b id="st-wpm">–</b></div>
+        <div class="stat"><span class="lbl">Camera</span><b id="st-fps">–</b></div>
+      </div>
+    </div>
+
+    <div class="btns two">
+      <button class="btn primary" id="rx-start">Start camera</button>
+      <button class="btn danger" id="rx-stop" disabled>Stop</button>
+    </div>
+    <div class="status" id="rx-status"></div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><span class="lbl">Decoded</span>
+        <div class="row" style="gap:6px">
+          <button class="btn" id="rx-copy" style="padding:6px 12px;font-size:14px">Copy</button>
+          <button class="btn" id="rx-clear" style="padding:6px 12px;font-size:14px">Clear</button>
+        </div>
+      </div>
+      <div class="decoded" id="decoded" aria-live="polite"><span class="placeholder">Decoded text appears here.</span></div>
+    </div>
+
+    <details>
+      <summary>Receiver settings</summary>
+      <div class="card">
+        <div class="field">
+          <label class="lbl" for="cam">Camera</label>
+          <select id="cam"><option value="">Default (back camera)</option></select>
+        </div>
+        <div class="field">
+          <div class="row" style="justify-content:space-between"><label class="lbl" for="tsize">Target size</label><span class="val" id="tsize-val"></span></div>
+          <input id="tsize" type="range" min="6" max="60" step="1" value="20">
+        </div>
+        <div class="field">
+          <div class="row" style="justify-content:space-between"><label class="lbl" for="sens">Min. contrast</label><span class="val" id="sens-val"></span></div>
+          <input id="sens" type="range" min="8" max="120" step="1" value="28">
+        </div>
+        <div class="field">
+          <div class="row" style="justify-content:space-between"><label class="lbl" for="rwpm">Expected speed (adapts automatically)</label><span class="val" id="rwpm-val"></span></div>
+          <input id="rwpm" type="range" min="3" max="20" step="1" value="6">
+        </div>
+        <label class="check" id="exp-wrap" hidden><input type="checkbox" id="exp-lock"> Lock exposure (helps in the dark)</label>
+      </div>
+    </details>
+  </section>
+</div>
+
+<div class="lamp" id="lamp" hidden>
+  <div class="lamp-ui">
+    <span id="lamp-info"></span>
+    <button class="btn" id="lamp-stop">Stop</button>
+  </div>
+</div>
+
+<video id="torch-video" playsinline muted hidden></video>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- Morse tables ---------- */
+const MORSE = {
+  A:'.-', B:'-...', C:'-.-.', D:'-..', E:'.', F:'..-.', G:'--.', H:'....', I:'..', J:'.---', K:'-.-', L:'.-..', M:'--',
+  N:'-.', O:'---', P:'.--.', Q:'--.-', R:'.-.', S:'...', T:'-', U:'..-', V:'...-', W:'.--', X:'-..-', Y:'-.--', Z:'--..',
+  '0':'-----', '1':'.----', '2':'..---', '3':'...--', '4':'....-', '5':'.....', '6':'-....', '7':'--...', '8':'---..', '9':'----.',
+  '.':'.-.-.-', ',':'--..--', '?':'..--..', "'":'.----.', '!':'-.-.--', '/':'-..-.', '(':'-.--.', ')':'-.--.-', '&':'.-...',
+  ':':'---...', ';':'-.-.-.', '=':'-...-', '+':'.-.-.', '-':'-....-', '"':'.-..-.', '@':'.--.-.'
+};
+const DECODE = Object.fromEntries(Object.entries(MORSE).map(([k, v]) => [v, k]));
+DECODE['...---...'] = 'SOS';
+
+const unitFromWpm = wpm => 1200 / wpm; // PARIS standard
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+const $ = id => document.getElementById(id);
+
+/* Turn text into timed on/off steps. ci = index of the source character for highlighting. */
+function encode(text, prosign = false) {
+  const steps = [];
+  const chars = [...text.toUpperCase()];
+  if (prosign) {
+    // Send the whole thing as one symbol (e.g. SOS as ...---... without letter gaps)
+    const code = chars.map(c => MORSE[c] || '').join('');
+    [...code].forEach((s, i) => {
+      if (i) steps.push({ on: false, units: 1, ci: -1 });
+      steps.push({ on: true, units: s === '.' ? 1 : 3, ci: -1 });
+    });
+    return steps;
+  }
+  let gap = 0;
+  chars.forEach((ch, ci) => {
+    if (/\s/.test(ch)) { if (steps.length) gap = 7; return; }
+    const code = MORSE[ch];
+    if (!code) return;
+    if (steps.length) steps.push({ on: false, units: Math.max(gap, 3), ci });
+    gap = 0;
+    [...code].forEach((s, i) => {
+      if (i) steps.push({ on: false, units: 1, ci });
+      steps.push({ on: true, units: s === '.' ? 1 : 3, ci });
+    });
+  });
+  return steps;
+}
+
+/* Decoder: receives clean on/off edges with timestamps and learns the sender's speed.
+   The current transmission is re-decoded on every update, so early letters fix themselves
+   once the speed is known. A long silence (12+ units) commits the transmission. */
+class Decoder {
+  constructor(unit) { this.unit = unit; this.reset(); }
+  reset(unit) {
+    if (unit) this.unit = unit;
+    this.durs = []; this.tail = 0; this.on = false; this.since = null;
+    this.committed = ''; this.text = ''; this.sym = '';
+  }
+  edge(on, t) {
+    if (this.since !== null) {
+      const d = t - this.since;
+      if (d > 0 && (this.on || this.durs.length)) this.durs.push({ on: this.on, d });
+    }
+    this.on = on; this.since = t; this.tail = 0;
+    this.decode();
+  }
+  tick(t) {
+    if (this.on || this.since === null || !this.durs.length) return;
+    this.tail = t - this.since;
+    this.decode();
+  }
+  flush() {
+    if (this.durs.length) { this.tail = 1e9; this.decode(); }
+    this.on = false; this.since = null; this.tail = 0;
+  }
+  decode() {
+    const u = this.unit = this.estimate();
+    const items = this.tail ? [...this.durs, { on: false, d: this.tail }] : this.durs;
+    let text = '', sym = '';
+    for (const it of items) {
+      if (it.on) sym += it.d > u * 2 ? '-' : '.';
+      else if (it.d > u * 2.5) {
+        if (sym) { text += DECODE[sym] ?? '·'; sym = ''; }
+        if (it.d > u * 5.5) text += ' ';
+      }
+    }
+    this.text = this.committed + text; this.sym = sym;
+    if (this.tail > u * 12 || this.durs.length > 600) {
+      this.committed = this.text.replace(/\s+$/, '') + ' ';
+      this.text = this.committed; this.durs = []; this.tail = 0;
+    }
+  }
+  // Dot length = the shortest cluster of on/off durations (dots and the gaps inside a letter are both 1 unit).
+  estimate() {
+    const s = this.durs.map(x => x.d).sort((a, b) => a - b);
+    if (!s.length) return this.unit;
+    const minLower = Math.max(1, Math.ceil(s.length * 0.2));
+    for (let i = minLower; i < s.length; i++) {
+      if (s[i] / s[i - 1] > 1.8) return clamp(median(s.slice(0, i)), 30, 2000);
+    }
+    const m = median(s);
+    return clamp(m < this.unit * 2 ? m : m / 3, 30, 2000);
+  }
+}
+window.Lamplight = { encode, Decoder, MORSE };
+
+/* ---------- Shared bits ---------- */
+const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && 'wakeLock' in navigator) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch { /* not allowed, fine */ }
+}
+function setStatus(el, msg, kind = '') { el.textContent = msg; el.className = 'status' + (kind ? ' ' + kind : ''); }
+const cameraHelp = () => location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+  ? 'Camera access was refused. Allow it in the browser’s site settings and try again.'
+  : 'The camera needs HTTPS. Open this page over https:// (or on localhost).';
+
+/* ---------- Tabs ---------- */
+const tabs = { send: [$('tab-send'), $('panel-send')], recv: [$('tab-recv'), $('panel-recv')] };
+function showTab(name) {
+  for (const [k, [btn, panel]] of Object.entries(tabs)) {
+    btn.setAttribute('aria-selected', k === name);
+    panel.hidden = k !== name;
+  }
+  if (name === 'send') stopRx(); else stopSend();
+}
+$('tab-send').onclick = () => showTab('send');
+$('tab-recv').onclick = () => showTab('recv');
+
+/* ---------- SEND ---------- */
+const msgEl = $('msg'), morseEl = $('morse'), wpmEl = $('wpm'), sendStatus = $('send-status');
+const lamp = $('lamp'), lampInfo = $('lamp-info');
+let mode = isMobile ? 'torch' : 'screen';
+let torchTrack = null, torchStream = null, torchKnownMissing = false;
+let sendRun = 0;
+
+function renderMorse() {
+  const chars = [...msgEl.value.toUpperCase()];
+  morseEl.innerHTML = '';
+  let first = true;
+  chars.forEach((ch, ci) => {
+    if (/\s/.test(ch)) { if (!first) { const s = document.createElement('span'); s.className = 'sep'; s.textContent = '/'; morseEl.append(s); } return; }
+    const code = MORSE[ch]; if (!code) return;
+    const s = document.createElement('span');
+    s.className = 'c'; s.dataset.ci = ci; s.textContent = code.replace(/\./g, '·').replace(/-/g, '−');
+    morseEl.append(s, ' ');
+    first = false;
+  });
+  if (!morseEl.childNodes.length) morseEl.textContent = 'Type letters or numbers to see the code.';
+}
+function highlight(ci) {
+  morseEl.querySelectorAll('.c').forEach(el => {
+    const i = +el.dataset.ci;
+    el.classList.toggle('active', i === ci);
+    el.classList.toggle('done', ci >= 0 && i < ci);
+  });
+}
+function updateWpm() { $('wpm-val').textContent = `${wpmEl.value} WPM · dot ${Math.round(unitFromWpm(+wpmEl.value))} ms`; }
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('#mode button').forEach(b => b.setAttribute('aria-pressed', b.dataset.mode === m));
+}
+document.querySelectorAll('#mode button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+
+async function acquireTorch() {
+  if (torchTrack && torchTrack.readyState === 'live') return torchTrack;
+  if (!hasCamera) throw new Error('nocamera');
+  const tv = $('torch-video');
+  const tryStream = async constraints => {
+    const s = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+    const tr = s.getVideoTracks()[0];
+    tv.srcObject = s; try { await tv.play(); } catch {}
+    const caps = tr.getCapabilities ? tr.getCapabilities() : {};
+    if (caps.torch) return { s, tr };
+    s.getTracks().forEach(t => t.stop());
+    return null;
+  };
+  let got = await tryStream({ facingMode: { ideal: 'environment' } });
+  if (!got) {
+    // Phones with several back cameras: only one of them usually owns the torch
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    for (const d of devs) {
+      if (/front|user|facetime/i.test(d.label)) continue;
+      try { got = await tryStream({ deviceId: { exact: d.deviceId } }); } catch {}
+      if (got) break;
+    }
+  }
+  if (!got) throw new Error('notorch');
+  torchStream = got.s; torchTrack = got.tr;
+  return torchTrack;
+}
+function releaseTorch() {
+  if (torchStream) torchStream.getTracks().forEach(t => t.stop());
+  torchStream = null; torchTrack = null; $('torch-video').srcObject = null;
+}
+async function setLight(on, m) {
+  if (m === 'torch') {
+    try { await torchTrack.applyConstraints({ advanced: [{ torch: on }] }); } catch {}
+  } else {
+    lamp.classList.toggle('on', on);
+  }
+}
+const sleepUntil = t => new Promise(r => setTimeout(r, Math.max(0, t - performance.now())));
+
+async function startSend(prosign) {
+  const text = prosign ? 'SOS' : msgEl.value;
+  const steps = encode(text, prosign);
+  if (!steps.length) { setStatus(sendStatus, 'Nothing to send. Type letters or numbers.', 'err'); return; }
+  stopSend();
+  const id = ++sendRun;
+  let m = mode;
+  if (m === 'torch') {
+    setStatus(sendStatus, 'Opening the flashlight…');
+    try { await acquireTorch(); }
+    catch (e) {
+      if (e.message === 'notorch') {
+        torchKnownMissing = true;
+        setStatus(sendStatus, 'This browser can’t control the flashlight. Using the screen instead.', 'err');
+      } else setStatus(sendStatus, e.name === 'NotAllowedError' ? cameraHelp() + ' Using the screen instead.' : 'Couldn’t open the camera. Using the screen instead.', 'err');
+      m = 'screen';
+    }
+    if (id !== sendRun) return;
+  }
+  if (m === 'screen') {
+    lamp.hidden = false; lamp.classList.remove('on');
+    lampInfo.textContent = prosign ? 'SOS' : text.toUpperCase().slice(0, 40);
+    try { await document.documentElement.requestFullscreen?.(); } catch {}
+  }
+  if (m === 'torch') setStatus(sendStatus, 'Sending with the flashlight…', 'ok');
+  else if (!sendStatus.classList.contains('err')) setStatus(sendStatus, 'Sending with the screen…', 'ok');
+  $('stop').disabled = false;
+  keepAwake(true);
+
+  const unit = unitFromWpm(+wpmEl.value);
+  do {
+    let t = performance.now() + 400; // short dark lead-in so the receiver sees a baseline
+    await setLight(false, m);
+    await sleepUntil(t);
+    for (const st of steps) {
+      if (id !== sendRun) return;
+      await setLight(st.on, m);
+      if (!prosign) highlight(st.ci);
+      t += st.units * unit;
+      await sleepUntil(t);
+    }
+    if (id !== sendRun) return;
+    await setLight(false, m);
+    highlight(-1);
+    await sleepUntil(t + 7 * unit);
+  } while ($('repeat').checked && id === sendRun);
+  if (id === sendRun) { stopSend(); setStatus(sendStatus, 'Sent.', 'ok'); }
+}
+function stopSend() {
+  sendRun++;
+  if (torchTrack) { try { torchTrack.applyConstraints({ advanced: [{ torch: false }] }); } catch {} }
+  releaseTorch();
+  lamp.classList.remove('on'); lamp.hidden = true;
+  if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  highlight(-1);
+  $('stop').disabled = true;
+  if (!rx.running) keepAwake(false);
+}
+$('send').onclick = () => startSend(false);
+$('sos').onclick = () => startSend(true);
+$('stop').onclick = () => { stopSend(); setStatus(sendStatus, 'Stopped.'); };
+$('lamp-stop').onclick = () => { stopSend(); setStatus(sendStatus, 'Stopped.'); };
+msgEl.addEventListener('input', renderMorse);
+wpmEl.addEventListener('input', updateWpm);
+
+/* ---------- RECEIVE ---------- */
+const video = $('video'), viewer = $('viewer'), targetEl = $('target'), graph = $('graph'), gctx = graph.getContext('2d');
+const rxStatus = $('rx-status'), decodedEl = $('decoded');
+const N = 48; // sample patch is scaled down to N×N pixels
+const sampler = document.createElement('canvas'); sampler.width = sampler.height = N;
+const sctx = sampler.getContext('2d', { willReadFrequently: true });
+const rx = {
+  running: false, stream: null, track: null,
+  target: { x: 0.5, y: 0.5, size: 0.2 },
+  win: [], state: false, cand: null, candN: 0, candT: 0,
+  frames: 0, fpsT: 0, fps: 0, lastRender: '',
+  decoder: new Decoder(unitFromWpm(6)),
+};
+
+function placeTarget() {
+  const vw = video.videoWidth || 4, vh = video.videoHeight || 3;
+  const m = Math.min(vw, vh) * rx.target.size;
+  Object.assign(targetEl.style, {
+    left: rx.target.x * 100 + '%', top: rx.target.y * 100 + '%',
+    width: m / vw * 100 + '%', height: m / vh * 100 + '%',
+  });
+}
+viewer.addEventListener('pointerdown', e => {
+  if (!rx.running) return;
+  const r = viewer.getBoundingClientRect();
+  rx.target.x = clamp((e.clientX - r.left) / r.width, 0, 1);
+  rx.target.y = clamp((e.clientY - r.top) / r.height, 0, 1);
+  rx.win.length = 0; // new spot, new baseline
+  placeTarget();
+  $('hint').hidden = true;
+});
+
+// Brightness of the target patch: mean of the brightest 10% of pixels, so a small light still counts
+function sample() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const s = Math.min(vw, vh) * rx.target.size;
+  const sx = clamp(rx.target.x * vw - s / 2, 0, vw - s), sy = clamp(rx.target.y * vh - s / 2, 0, vh - s);
+  sctx.drawImage(video, sx, sy, s, s, 0, 0, N, N);
+  const d = sctx.getImageData(0, 0, N, N).data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) hist[(d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8]++;
+  const need = Math.max(1, (N * N * 0.1) | 0);
+  let sum = 0, cnt = 0;
+  for (let v = 255; v >= 0 && cnt < need; v--) { const take = Math.min(hist[v], need - cnt); sum += take * v; cnt += take; }
+  return sum / cnt;
+}
+
+// Adaptive threshold over the last 4 s, with hysteresis and a 2-frame debounce
+function detect(v, t) {
+  const win = rx.win;
+  win.push({ t, v, on: rx.state });
+  while (win.length && win[0].t < t - 4000) win.shift();
+  let lo = 255, hi = 0;
+  for (const p of win) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+  const range = hi - lo, minC = +$('sens').value;
+  let raw = false;
+  if (range >= minC) { const f = (v - lo) / range; raw = rx.state ? f > 0.4 : f > 0.6; }
+  if (raw !== rx.state) {
+    if (rx.cand === raw) rx.candN++; else { rx.cand = raw; rx.candN = 1; rx.candT = t; }
+    if (rx.candN >= 2) { rx.state = raw; rx.cand = null; rx.decoder.edge(raw, rx.candT); }
+  } else rx.cand = null;
+  win[win.length - 1].on = rx.state;
+  rx.decoder.tick(t);
+  return { lo, hi, range, minC };
+}
+
+function drawGraph(info) {
+  const W = graph.width, H = graph.height, win = rx.win;
+  gctx.clearRect(0, 0, W, H);
+  if (!win.length) return;
+  const t1 = win[win.length - 1].t, t0 = t1 - 4000;
+  const x = t => (t - t0) / 4000 * W, y = v => H - 6 - v / 255 * (H - 12);
+  const css = getComputedStyle(document.documentElement);
+  gctx.fillStyle = css.getPropertyValue('--lamp').trim() + '33';
+  for (let i = 0; i < win.length - 1; i++) if (win[i].on) gctx.fillRect(x(win[i].t), 0, x(win[i + 1].t) - x(win[i].t) + 1, H);
+  if (info.range >= info.minC) {
+    gctx.strokeStyle = css.getPropertyValue('--muted').trim(); gctx.setLineDash([4, 4]); gctx.lineWidth = 1;
+    const th = info.lo + info.range * 0.5;
+    gctx.beginPath(); gctx.moveTo(0, y(th)); gctx.lineTo(W, y(th)); gctx.stroke(); gctx.setLineDash([]);
+  }
+  gctx.strokeStyle = css.getPropertyValue('--lamp').trim(); gctx.lineWidth = 2;
+  gctx.beginPath();
+  win.forEach((p, i) => i ? gctx.lineTo(x(p.t), y(p.v)) : gctx.moveTo(x(p.t), y(p.v)));
+  gctx.stroke();
+}
+
+function renderDecoded() {
+  const d = rx.decoder;
+  const key = d.text + '|' + d.sym;
+  if (key === rx.lastRender) return;
+  rx.lastRender = key;
+  decodedEl.textContent = '';
+  if (!d.text && !d.sym) { decodedEl.innerHTML = '<span class="placeholder">Decoded text appears here.</span>'; return; }
+  decodedEl.append(d.text);
+  if (d.sym) { const s = document.createElement('span'); s.className = 'pending'; s.textContent = ' ' + d.sym.replace(/\./g, '·').replace(/-/g, '−'); decodedEl.append(s); }
+}
+
+function frame(now) {
+  if (!rx.running) return;
+  const t = performance.now();
+  const v = sample();
+  if (v !== null) {
+    const info = detect(v, t);
+    rx.frames++;
+    if (t - rx.fpsT > 1000) { rx.fps = Math.round(rx.frames * 1000 / (t - rx.fpsT)); rx.frames = 0; rx.fpsT = t; }
+    targetEl.classList.toggle('on', rx.state);
+    drawGraph(info);
+    $('st-sig').textContent = info.range < info.minC ? 'none' : rx.state ? 'ON' : 'off';
+    $('st-con').textContent = Math.round(info.range);
+    $('st-wpm').textContent = Math.round(1200 / rx.decoder.unit) + ' wpm';
+    $('st-fps').textContent = rx.fps + ' fps';
+    renderDecoded();
+  }
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(frame);
+  else requestAnimationFrame(frame);
+}
+
+async function listCameras(currentId) {
+  const sel = $('cam');
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  sel.innerHTML = '';
+  devs.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId; o.textContent = d.label || `Camera ${i + 1}`;
+    if (d.deviceId === currentId) o.selected = true;
+    sel.append(o);
+  });
+}
+
+async function startRx(deviceId) {
+  if (!hasCamera) { setStatus(rxStatus, cameraHelp(), 'err'); return; }
+  stopRx(); stopSend();
+  setStatus(rxStatus, 'Opening the camera…');
+  const base = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } };
+  try {
+    rx.stream = await navigator.mediaDevices.getUserMedia({
+      video: { ...base, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }, audio: false,
+    });
+  } catch (e) {
+    setStatus(rxStatus, e.name === 'NotAllowedError' || e.name === 'SecurityError' ? cameraHelp() : 'Couldn’t open a camera: ' + e.message, 'err');
+    return;
+  }
+  rx.track = rx.stream.getVideoTracks()[0];
+  video.srcObject = rx.stream;
+  try { await video.play(); } catch {}
+  await new Promise(r => video.videoWidth ? r() : video.addEventListener('loadedmetadata', r, { once: true }));
+  viewer.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+  const caps = rx.track.getCapabilities ? rx.track.getCapabilities() : {};
+  $('exp-wrap').hidden = !(caps.exposureMode && caps.exposureMode.includes('manual'));
+  $('exp-lock').checked = false;
+  listCameras(rx.track.getSettings().deviceId).catch(() => {});
+  rx.running = true; rx.win.length = 0; rx.state = false; rx.frames = 0; rx.fpsT = performance.now();
+  rx.decoder.flush();
+  $('viewer-empty').hidden = true; targetEl.hidden = false; $('hint').hidden = false;
+  placeTarget();
+  $('rx-start').disabled = true; $('rx-stop').disabled = false;
+  setStatus(rxStatus, 'Listening. Aim the box at the light.', 'ok');
+  keepAwake(true);
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(frame); else requestAnimationFrame(frame);
+}
+function stopRx() {
+  if (!rx.running && !rx.stream) return;
+  rx.running = false;
+  if (rx.stream) rx.stream.getTracks().forEach(t => t.stop());
+  rx.stream = null; rx.track = null; video.srcObject = null;
+  // close any letter still in progress
+  rx.decoder.flush(); rx.lastRender = ''; renderDecoded();
+  $('viewer-empty').hidden = false; targetEl.hidden = true; $('hint').hidden = true;
+  $('rx-start').disabled = false; $('rx-stop').disabled = true;
+  ['st-sig', 'st-con', 'st-wpm', 'st-fps'].forEach(id => $(id).textContent = '–');
+  gctx.clearRect(0, 0, graph.width, graph.height);
+  setStatus(rxStatus, '');
+  if (sendRun && $('stop').disabled) keepAwake(false);
+}
+
+$('rx-start').onclick = () => startRx($('cam').value || undefined);
+$('rx-stop').onclick = stopRx;
+$('cam').onchange = () => { if (rx.running || $('cam').value) startRx($('cam').value || undefined); };
+$('rx-clear').onclick = () => { rx.decoder.reset(unitFromWpm(+$('rwpm').value)); rx.lastRender = ''; renderDecoded(); };
+$('rx-copy').onclick = async () => {
+  const text = rx.decoder.text.trim();
+  if (!text) return;
+  try { await navigator.clipboard.writeText(text); setStatus(rxStatus, 'Copied.', 'ok'); }
+  catch { setStatus(rxStatus, 'Couldn’t copy. Select the text instead.', 'err'); }
+};
+$('exp-lock').onchange = async e => {
+  try { await rx.track.applyConstraints({ advanced: [{ exposureMode: e.target.checked ? 'manual' : 'continuous' }] }); rx.win.length = 0; }
+  catch { e.target.checked = false; setStatus(rxStatus, 'This camera won’t lock exposure.', 'err'); }
+};
+const bindVal = (id, fmt, fn) => { const el = $(id); const u = () => { $(id + '-val').textContent = fmt(+el.value); fn && fn(+el.value); }; el.addEventListener('input', u); u(); };
+bindVal('tsize', v => v + '%', v => { rx.target.size = v / 100; rx.win.length = 0; placeTarget(); });
+bindVal('sens', v => String(v));
+bindVal('rwpm', v => v + ' WPM', v => { rx.decoder.unit = unitFromWpm(v); });
+
+// The OS cuts the camera when the page is hidden, so stop a torch send. Screen mode must survive this:
+// entering fullscreen on macOS briefly reports the page as hidden.
+document.addEventListener('visibilitychange', () => { if (document.hidden && torchTrack) stopSend(); });
+
+/* ---------- Init ---------- */
+setMode(mode);
+renderMorse(); updateWpm();
+if (!hasCamera) {
+  setStatus(sendStatus, cameraHelp() + ' The screen can still flash.', 'err');
+  setMode('screen');
+}
+})();
+</script>
+</body>
+</html>
