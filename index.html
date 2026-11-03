@@ -138,7 +138,7 @@ details .card { margin-top: 4px; }
       <div class="row">
         <div class="field grow">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="wpm">Speed</label><span class="val" id="wpm-val"></span></div>
-          <input id="wpm" type="range" min="3" max="20" step="1" value="6">
+          <input id="wpm" type="range" min="3" max="12" step="1" value="5">
         </div>
       </div>
       <div class="row" style="justify-content:space-between">
@@ -212,7 +212,7 @@ details .card { margin-top: 4px; }
         </div>
         <div class="field">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="rwpm">Expected speed (adapts automatically)</label><span class="val" id="rwpm-val"></span></div>
-          <input id="rwpm" type="range" min="3" max="20" step="1" value="6">
+          <input id="rwpm" type="range" min="3" max="12" step="1" value="5">
         </div>
         <label class="check" id="exp-wrap" hidden><input type="checkbox" id="exp-lock"> Lock exposure (helps in the dark)</label>
       </div>
@@ -223,6 +223,7 @@ details .card { margin-top: 4px; }
 <div class="lamp" id="lamp" hidden>
   <div class="lamp-ui">
     <span id="lamp-info"></span>
+    <span>Turn screen brightness all the way up</span>
     <button class="btn" id="lamp-stop">Stop</button>
   </div>
 </div>
@@ -233,6 +234,7 @@ details .card { margin-top: 4px; }
 (() => {
 'use strict';
 
+/* CORE START: pure logic, also loaded by test/sim.mjs */
 /* ---------- Morse tables ---------- */
 const MORSE = {
   A:'.-', B:'-...', C:'-.-.', D:'-..', E:'.', F:'..-.', G:'--.', H:'....', I:'..', J:'.---', K:'-.-', L:'.-..', M:'--',
@@ -277,13 +279,49 @@ function encode(text, prosign = false) {
   return steps;
 }
 
-/* Decoder: receives clean on/off edges with timestamps and learns the sender's speed.
+/* Detector: turns per-frame brightness into on/off edges.
+   Threshold sits halfway between the darkest and brightest value of the last few seconds. */
+class Detector {
+  constructor() { this.reset(); }
+  reset() { this.win = []; this.state = false; this.cand = null; this.candN = 0; this.candT = 0; this.peak = 0; this.peakT = 0; }
+  // Returns the edge {on, t} when the state changes, else null. this.info holds lo/hi/range for display.
+  push(v, t, minContrast) {
+    const win = this.win;
+    win.push({ t, v, on: this.state });
+    while (win.length && win[0].t < t - 5000) win.shift();
+    let lo = 255, hi = 0;
+    for (const p of win) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+    const range = hi - lo;
+    // Remember the strongest contrast seen (fading over ~10 s), so noise during a long pause
+    // isn't mistaken for light once the last flash has left the window
+    this.peak = Math.max(range, this.peak * 2 ** (-(t - this.peakT) / 10000)); this.peakT = t;
+    const need = Math.max(minContrast, this.peak * 0.6);
+    this.info = { lo, hi, range, minC: need };
+    let raw = false;
+    if (range >= need) { const f = (v - lo) / range; raw = this.state ? f > 0.42 : f > 0.58; }
+    let edge = null;
+    if (raw !== this.state) {
+      // One frame is enough when it's clearly past the threshold; a borderline frame needs a second one
+      const f = range ? (v - lo) / range : 0;
+      const clear = raw ? f > 0.7 : f < 0.3;
+      if (this.cand === raw) this.candN++; else { this.cand = raw; this.candN = 1; this.candT = t; }
+      if (clear || this.candN >= 2) { this.state = raw; this.cand = null; edge = { on: raw, t: this.candT }; }
+    } else this.cand = null;
+    win[win.length - 1].on = this.state;
+    return edge;
+  }
+}
+
+/* Decoder: receives on/off edges with timestamps and learns the sender's speed.
+   Real light smears: flashes look longer and gaps shorter by a constant amount (torch lag,
+   camera exposure, frame timing). Dots and dashes reveal both the unit and that bias:
+   dot = u + b, dash = 3u + b. All durations are corrected by b before classifying.
    The current transmission is re-decoded on every update, so early letters fix themselves
    once the speed is known. A long silence (12+ units) commits the transmission. */
 class Decoder {
-  constructor(unit) { this.unit = unit; this.reset(); }
+  constructor(unit) { this.unit = unit; this.bias = 0; this.reset(); }
   reset(unit) {
-    if (unit) this.unit = unit;
+    if (unit) { this.unit = unit; this.bias = 0; }
     this.durs = []; this.tail = 0; this.on = false; this.since = null;
     this.committed = ''; this.text = ''; this.sym = '';
   }
@@ -304,36 +342,82 @@ class Decoder {
     if (this.durs.length) { this.tail = 1e9; this.decode(); }
     this.on = false; this.since = null; this.tail = 0;
   }
+  // Drop flickers: a flash or gap much shorter than a dot is merged into its neighbours
+  clean(items) {
+    const out = [], min = this.unit * 0.35, b = this.bias;
+    const len = x => x.on ? x.d - b : x.d + b; // bias-corrected length
+    for (const it of items) {
+      const prev = out[out.length - 1];
+      if (prev && prev.on === it.on) { prev.d += it.d; continue; }
+      if (prev && len(prev) < min && out.length >= 2) {
+        out.pop(); out[out.length - 1].d += prev.d + it.d; continue;
+      }
+      out.push({ ...it });
+    }
+    return out;
+  }
   decode() {
-    const u = this.unit = this.estimate();
-    const items = this.tail ? [...this.durs, { on: false, d: this.tail }] : this.durs;
+    this.estimate(this.durs);
+    this.estimate(this.clean(this.durs));
+    const u = this.unit, b = this.bias;
+    const items = this.clean(this.tail ? [...this.durs, { on: false, d: this.tail }] : this.durs);
     let text = '', sym = '';
     for (const it of items) {
-      if (it.on) sym += it.d > u * 2 ? '-' : '.';
-      else if (it.d > u * 2.5) {
+      if (it.on) sym += it.d - b > u * 2 ? '-' : '.';
+      else if (it.d + b > u * 2) {
         if (sym) { text += DECODE[sym] ?? '·'; sym = ''; }
-        if (it.d > u * 5.5) text += ' ';
+        if (it.d + b > u * 5) text += ' ';
       }
     }
     this.text = this.committed + text; this.sym = sym;
-    if (this.tail > u * 12 || this.durs.length > 600) {
+    if ((this.tail + b > u * 12 && this.tail > 2500) || this.durs.length > 600) {
       this.committed = this.text.replace(/\s+$/, '') + ' ';
       this.text = this.committed; this.durs = []; this.tail = 0;
     }
   }
-  // Dot length = the shortest cluster of on/off durations (dots and the gaps inside a letter are both 1 unit).
-  estimate() {
-    const s = this.durs.map(x => x.d).sort((a, b) => a - b);
-    if (!s.length) return this.unit;
-    const minLower = Math.max(1, Math.ceil(s.length * 0.2));
-    for (let i = minLower; i < s.length; i++) {
-      if (s[i] / s[i - 1] > 1.8) return clamp(median(s.slice(0, i)), 30, 2000);
+  // Unit: a flash plus the gap after it is unaffected by the bias (light that starts late also ends late).
+  // A dot plus the gap inside a letter is exactly 2 units, the shortest such pair. Bias: dot length - unit.
+  estimate(items) {
+    const ons = items.filter(x => x.on).map(x => x.d).sort((a, b) => a - b);
+    if (!ons.length) return;
+    let u, b;
+    const split = Decoder.split(ons);
+    if (split && median(split.high) / median(split.low) > 1.8) {
+      // Dots and dashes both seen: dot = u + b, dash = 3u + b
+      const dot = median(split.low), dash = median(split.high);
+      u = (dash - dot) / 2; b = dot - u;
+    } else {
+      // One kind of flash so far: use flash + following gap pairs (2u for a dot inside a letter)
+      const pairs = [];
+      for (let i = 0; i + 1 < items.length; i++) if (items[i].on && !items[i + 1].on) pairs.push(items[i].d + items[i + 1].d);
+      pairs.sort((a, b) => a - b);
+      const ps = Decoder.split(pairs);
+      if (ps && median(ps.high) / median(ps.low) > 1.6) u = median(ps.low) / 2;
+      else if (pairs.length) { const m = median(pairs); u = Math.abs(m / 2 - this.unit) < Math.abs(m / 4 - this.unit) ? m / 2 : m / 4; }
+      else u = this.unit;
+      const m = median(ons);
+      b = Math.abs(m - u) < Math.abs(m - 3 * u) ? m - u : m - 3 * u;
     }
-    const m = median(s);
-    return clamp(m < this.unit * 2 ? m : m / 3, 30, 2000);
+    this.unit = u = clamp(u, 30, 2000);
+    this.bias = clamp(b, -0.6 * u, 0.8 * u);
+  }
+  // Best split of sorted values into a short and a long group (Otsu's method on log durations)
+  static split(s) {
+    if (s.length < 2) return null;
+    const l = s.map(Math.log);
+    let best = -1, idx = -1, sumL = 0;
+    const total = l.reduce((a, x) => a + x, 0);
+    for (let i = 1; i < l.length; i++) {
+      sumL += l[i - 1];
+      const n1 = i, n2 = l.length - i, m1 = sumL / n1, m2 = (total - sumL) / n2;
+      const between = n1 * n2 * (m1 - m2) ** 2;
+      if (between > best) { best = between; idx = i; }
+    }
+    return { low: s.slice(0, idx), high: s.slice(idx) };
   }
 }
-window.Lamplight = { encode, Decoder, MORSE };
+/* CORE END */
+window.Lamplight = { encode, Decoder, Detector, MORSE };
 
 /* ---------- Shared bits ---------- */
 const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
@@ -459,10 +543,11 @@ async function startSend(prosign) {
   if (m === 'screen') {
     lamp.hidden = false; lamp.classList.remove('on');
     lampInfo.textContent = prosign ? 'SOS' : text.toUpperCase().slice(0, 40);
-    try { await document.documentElement.requestFullscreen?.(); } catch {}
+    // Don't await: in some embedded browsers the request never settles and sending would never start
+    try { document.documentElement.requestFullscreen?.()?.catch(() => {}); } catch {}
   }
   if (m === 'torch') setStatus(sendStatus, 'Sending with the flashlight…', 'ok');
-  else if (!sendStatus.classList.contains('err')) setStatus(sendStatus, 'Sending with the screen…', 'ok');
+  else if (!sendStatus.classList.contains('err')) setStatus(sendStatus, 'Sending with the screen. Turn brightness all the way up.', 'ok');
   $('stop').disabled = false;
   keepAwake(true);
 
@@ -511,9 +596,9 @@ const sctx = sampler.getContext('2d', { willReadFrequently: true });
 const rx = {
   running: false, stream: null, track: null,
   target: { x: 0.5, y: 0.5, size: 0.2 },
-  win: [], state: false, cand: null, candN: 0, candT: 0,
+  det: new Detector(),
   frames: 0, fpsT: 0, fps: 0, lastRender: '',
-  decoder: new Decoder(unitFromWpm(6)),
+  decoder: new Decoder(unitFromWpm(5)),
 };
 
 function placeTarget() {
@@ -529,7 +614,7 @@ viewer.addEventListener('pointerdown', e => {
   const r = viewer.getBoundingClientRect();
   rx.target.x = clamp((e.clientX - r.left) / r.width, 0, 1);
   rx.target.y = clamp((e.clientY - r.top) / r.height, 0, 1);
-  rx.win.length = 0; // new spot, new baseline
+  rx.det.reset(); // new spot, new baseline
   placeTarget();
   $('hint').hidden = true;
 });
@@ -550,27 +635,15 @@ function sample() {
   return sum / cnt;
 }
 
-// Adaptive threshold over the last 4 s, with hysteresis and a 2-frame debounce
 function detect(v, t) {
-  const win = rx.win;
-  win.push({ t, v, on: rx.state });
-  while (win.length && win[0].t < t - 4000) win.shift();
-  let lo = 255, hi = 0;
-  for (const p of win) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
-  const range = hi - lo, minC = +$('sens').value;
-  let raw = false;
-  if (range >= minC) { const f = (v - lo) / range; raw = rx.state ? f > 0.4 : f > 0.6; }
-  if (raw !== rx.state) {
-    if (rx.cand === raw) rx.candN++; else { rx.cand = raw; rx.candN = 1; rx.candT = t; }
-    if (rx.candN >= 2) { rx.state = raw; rx.cand = null; rx.decoder.edge(raw, rx.candT); }
-  } else rx.cand = null;
-  win[win.length - 1].on = rx.state;
+  const edge = rx.det.push(v, t, +$('sens').value);
+  if (edge) rx.decoder.edge(edge.on, edge.t);
   rx.decoder.tick(t);
-  return { lo, hi, range, minC };
+  return rx.det.info;
 }
 
 function drawGraph(info) {
-  const W = graph.width, H = graph.height, win = rx.win;
+  const W = graph.width, H = graph.height, win = rx.det.win;
   gctx.clearRect(0, 0, W, H);
   if (!win.length) return;
   const t1 = win[win.length - 1].t, t0 = t1 - 4000;
@@ -600,17 +673,17 @@ function renderDecoded() {
   if (d.sym) { const s = document.createElement('span'); s.className = 'pending'; s.textContent = ' ' + d.sym.replace(/\./g, '·').replace(/-/g, '−'); decodedEl.append(s); }
 }
 
-function frame(now) {
+function frame(now, meta) {
   if (!rx.running) return;
-  const t = performance.now();
+  const t = (meta && meta.captureTime) || performance.now();
   const v = sample();
   if (v !== null) {
     const info = detect(v, t);
     rx.frames++;
     if (t - rx.fpsT > 1000) { rx.fps = Math.round(rx.frames * 1000 / (t - rx.fpsT)); rx.frames = 0; rx.fpsT = t; }
-    targetEl.classList.toggle('on', rx.state);
+    targetEl.classList.toggle('on', rx.det.state);
     drawGraph(info);
-    $('st-sig').textContent = info.range < info.minC ? 'none' : rx.state ? 'ON' : 'off';
+    $('st-sig').textContent = info.range < info.minC ? 'none' : rx.det.state ? 'ON' : 'off';
     $('st-con').textContent = Math.round(info.range);
     $('st-wpm').textContent = Math.round(1200 / rx.decoder.unit) + ' wpm';
     $('st-fps').textContent = rx.fps + ' fps';
@@ -654,7 +727,7 @@ async function startRx(deviceId) {
   $('exp-wrap').hidden = !(caps.exposureMode && caps.exposureMode.includes('manual'));
   $('exp-lock').checked = false;
   listCameras(rx.track.getSettings().deviceId).catch(() => {});
-  rx.running = true; rx.win.length = 0; rx.state = false; rx.frames = 0; rx.fpsT = performance.now();
+  rx.running = true; rx.det.reset(); rx.frames = 0; rx.fpsT = performance.now();
   rx.decoder.flush();
   $('viewer-empty').hidden = true; targetEl.hidden = false; $('hint').hidden = false;
   placeTarget();
@@ -689,11 +762,11 @@ $('rx-copy').onclick = async () => {
   catch { setStatus(rxStatus, 'Couldn’t copy. Select the text instead.', 'err'); }
 };
 $('exp-lock').onchange = async e => {
-  try { await rx.track.applyConstraints({ advanced: [{ exposureMode: e.target.checked ? 'manual' : 'continuous' }] }); rx.win.length = 0; }
+  try { await rx.track.applyConstraints({ advanced: [{ exposureMode: e.target.checked ? 'manual' : 'continuous' }] }); rx.det.reset(); }
   catch { e.target.checked = false; setStatus(rxStatus, 'This camera won’t lock exposure.', 'err'); }
 };
 const bindVal = (id, fmt, fn) => { const el = $(id); const u = () => { $(id + '-val').textContent = fmt(+el.value); fn && fn(+el.value); }; el.addEventListener('input', u); u(); };
-bindVal('tsize', v => v + '%', v => { rx.target.size = v / 100; rx.win.length = 0; placeTarget(); });
+bindVal('tsize', v => v + '%', v => { rx.target.size = v / 100; rx.det.reset(); placeTarget(); });
 bindVal('sens', v => String(v));
 bindVal('rwpm', v => v + ' WPM', v => { rx.decoder.unit = unitFromWpm(v); });
 
