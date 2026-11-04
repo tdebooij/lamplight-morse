@@ -93,7 +93,7 @@ input[type="range"] { width: 100%; accent-color: var(--lamp); }
 .hint { position: absolute; left: 8px; bottom: 8px; font: 11px var(--f-mono); color: #fff; background: rgba(0,0,0,.55); padding: 3px 7px; border-radius: 4px; pointer-events: none; }
 
 canvas.graph { width: 100%; height: 70px; display: block; background: var(--bg); border-radius: 6px; border: 1px solid var(--line); }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .stat { display: grid; gap: 2px; }
 .stat b { font: 500 16px var(--f-mono); font-variant-numeric: tabular-nums; }
 
@@ -182,8 +182,10 @@ details .card { margin-top: 4px; }
       <div class="stats">
         <div class="stat"><span class="lbl">Signal</span><b id="st-sig">–</b></div>
         <div class="stat"><span class="lbl">Contrast</span><b id="st-con">–</b></div>
+        <div class="stat"><span class="lbl">Clarity</span><b id="st-need">–</b></div>
         <div class="stat"><span class="lbl">Speed</span><b id="st-wpm">–</b></div>
         <div class="stat"><span class="lbl">Camera</span><b id="st-fps">–</b></div>
+        <div class="stat"><span class="lbl">Room</span><b id="st-room">–</b></div>
       </div>
     </div>
 
@@ -216,7 +218,7 @@ details .card { margin-top: 4px; }
         </div>
         <div class="field">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="sens">Min. contrast</label><span class="val" id="sens-val"></span></div>
-          <input id="sens" type="range" min="8" max="120" step="1" value="36">
+          <input id="sens" type="range" min="8" max="120" step="1" value="16">
         </div>
         <div class="field">
           <div class="row" style="justify-content:space-between"><label class="lbl" for="rwpm">Expected speed (adapts automatically)</label><span class="val" id="rwpm-val"></span></div>
@@ -287,6 +289,46 @@ function encode(text, prosign = false) {
   return steps;
 }
 
+// Frame-to-frame noise of a brightness series. A low percentile of the changes ignores the real on/off steps.
+function frameNoise(series) {
+  if (series.length < 11) return 0;
+  const diffs = [];
+  for (let k = 1; k < series.length; k++) diffs.push(Math.abs(series[k].v - series[k - 1].v));
+  diffs.sort((a, b) => a - b);
+  return diffs[Math.floor(diffs.length * 0.3)] / 0.545;
+}
+
+// How much a brightness series looks like a signal light: strong contrast, clean on/off steps, little noise.
+// Fluorescent flicker scores low (noisy on every frame), slow drift and hand shake too (no clean steps).
+function blinkScore(series) {
+  let lo = 255, hi = 0;
+  for (const p of series) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+  const range = hi - lo, mid = lo + range / 2;
+  let steps = 0;
+  for (let i = 2; i + 1 < series.length; i++) {
+    const crossed = (series[i - 1].v < mid) !== (series[i].v < mid);
+    if (crossed && Math.abs(series[i + 1].v - series[i - 2].v) > range * 0.5) steps++;
+  }
+  return steps >= 2 ? range - frameNoise(series) * 4 : 0;
+}
+
+// How cleanly a series splits into two groups, 0..1: the share of its variance explained by the best split (Otsu)
+const CLARITY_MIN = 0.8;
+function twoGroupClarity(series) {
+  if (series.length < 11) return 0;
+  const s = series.map(p => p.v).sort((a, b) => a - b);
+  const n = s.length, total = s.reduce((a, x) => a + x, 0), mean = total / n;
+  const variance = s.reduce((a, x) => a + (x - mean) ** 2, 0) / n;
+  if (!variance) return 0;
+  let best = 0, low = 0;
+  for (let i = 1; i < n; i++) {
+    low += s[i - 1];
+    const w1 = i / n, w2 = 1 - w1, m1 = low / i, m2 = (total - low) / (n - i);
+    best = Math.max(best, w1 * w2 * (m1 - m2) ** 2);
+  }
+  return best / variance;
+}
+
 /* Detector: turns per-frame brightness into on/off edges.
    The threshold sits halfway between the darkest and brightest value of the last few seconds.
    Each frame is judged a few frames late (LOOK), so the window already holds the frames after it:
@@ -294,7 +336,7 @@ function encode(text, prosign = false) {
    by the next one. Edge times are placed inside the frame from how bright the frame was. */
 class Detector {
   constructor() { this.reset(); }
-  reset() { this.win = []; this.state = false; this.peak = 0; this.peakT = 0; this.info = { lo: 0, hi: 0, range: 0, minC: 0 }; }
+  reset() { this.win = []; this.state = false; this.info = { lo: 0, hi: 0, range: 0, clarity: 0, active: false }; }
   // Returns the edge {on, t} when the state changes, else null. this.info holds lo/hi/range for display.
   push(v, t, minContrast) {
     const LOOK = 3, win = this.win;
@@ -303,15 +345,15 @@ class Detector {
     let lo = 255, hi = 0;
     for (const p of win) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
     const range = hi - lo;
-    // Remember the strongest contrast seen (fading over ~10 s), so noise during a long pause
-    // isn't mistaken for light once the last flash has left the window
-    this.peak = Math.max(range, this.peak * 2 ** (-(t - this.peakT) / 10000)); this.peakT = t;
-    const need = Math.max(minContrast, this.peak * 0.6);
-    this.info = { lo, hi, range, minC: need };
+    // A real light makes the readings fall into two groups, on and off. Noise and flicker don't,
+    // whatever their size, so this works in a dark room and a flickering office alike.
+    const clarity = twoGroupClarity(win);
+    const active = range >= minContrast && clarity >= CLARITY_MIN;
+    this.info = { lo, hi, range, clarity, active };
     const i = win.length - 1 - LOOK;
     if (i < 1) return null;
     const p = win[i], prev = win[i - 1], next = win[i + 1];
-    const f = x => range >= need ? (x.v - lo) / range : 0;
+    const f = x => active ? (x.v - lo) / range : 0;
     let edge = null;
     const want = this.state ? f(p) > 0.45 : f(p) > 0.55;
     if (want !== this.state) {
@@ -443,7 +485,7 @@ class Decoder {
   }
 }
 /* CORE END */
-window.Lamplight = { encode, Decoder, Detector, MORSE };
+window.Lamplight = { encode, Decoder, Detector, MORSE, blinkScore, frameNoise, twoGroupClarity };
 
 /* ---------- Shared bits ---------- */
 const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
@@ -616,9 +658,6 @@ wpmEl.addEventListener('input', updateWpm);
 /* ---------- RECEIVE ---------- */
 const video = $('video'), viewer = $('viewer'), targetEl = $('target'), graph = $('graph'), gctx = graph.getContext('2d');
 const rxStatus = $('rx-status'), decodedEl = $('decoded');
-const N = 48; // sample patch is scaled down to N×N pixels
-const sampler = document.createElement('canvas'); sampler.width = sampler.height = N;
-const sctx = sampler.getContext('2d', { willReadFrequently: true });
 const rx = {
   running: false, stream: null, track: null,
   target: { x: 0.5, y: 0.5, size: 0.35 },
@@ -627,6 +666,8 @@ const rx = {
   frames: 0, fpsT: 0, fps: 0, lastRender: '',
   decoder: new Decoder(unitFromWpm(5)),
 };
+
+window.Lamplight.rx = rx; // for test/fake-camera.js
 
 function placeTarget() {
   if (rx.aim === 'auto') {
@@ -663,12 +704,12 @@ function setAim(a) {
 }
 document.querySelectorAll('#aim button').forEach(b => b.onclick = () => setAim(b.dataset.aim));
 
-// Auto-aim: split the whole view into a grid, track each cell's brightness,
-// and lock onto the cell that blinks hardest. Another cell must blink 1.5× harder to take over.
+// Every frame is compared with a per-pixel background, so only what changes counts, not what is bright.
+// The background drops at once and rises slowly, so it stays at the "light off" level through long flashes.
 const GRID_W = 320;
 const full = document.createElement('canvas');
 const fctx = full.getContext('2d', { willReadFrequently: true });
-function sampleGrid(t) {
+function readFrame(t) {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
   const W = GRID_W, H = Math.round(GRID_W * vh / vw);
@@ -677,60 +718,114 @@ function sampleGrid(t) {
     full.width = W; full.height = H;
     const cols = 10, rows = Math.max(3, Math.round(H / 32)), n = cols * rows;
     g = rx.grid = {
-      W, H, cols, rows,
+      W, H, cols, rows, lastT: t, mean: 0, median: 0,
       colOf: Uint8Array.from({ length: W }, (_, x) => Math.min(cols - 1, Math.floor(x * cols / W))),
       rowOf: Uint8Array.from({ length: H }, (_, y) => Math.min(rows - 1, Math.floor(y * rows / H))),
+      bg: null, diff: new Uint8Array(W * H), all: new Uint32Array(256),
       hist: new Uint16Array(n * 256), vals: new Float32Array(n), scores: new Float32Array(n),
-      hists: Array.from({ length: n }, () => []),
+      hists: Array.from({ length: n }, () => []), tick: 0,
     };
     rx.cell = -1;
   }
   fctx.drawImage(video, 0, 0, W, H);
   const d = fctx.getImageData(0, 0, W, H).data;
-  g.hist.fill(0);
-  for (let y = 0, i = 0; y < H; y++) {
-    const r = g.rowOf[y] * g.cols;
-    for (let x = 0; x < W; x++, i += 4) g.hist[(r + g.colOf[x]) * 256 + ((d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8)]++;
+  const size = W * H;
+  if (!g.bg) { g.bg = new Float32Array(size); for (let k = 0, i = 0; k < size; k++, i += 4) g.bg[k] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8; }
+  const rise = 15 * Math.min(0.2, (t - g.lastT) / 1000); // levels per second
+  g.lastT = t;
+  g.all.fill(0);
+  let sum = 0;
+  for (let k = 0, i = 0; k < size; k++, i += 4) {
+    const l = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    sum += l;
+    const b = Math.min(l, g.bg[k] + rise);
+    g.bg[k] = b;
+    const c = l - b | 0;
+    g.diff[k] = c;
+    g.all[c]++;
   }
-  const K = 12; // brightness of a cell = mean of its 12 brightest pixels, so a small light still counts
-  let best = -1, bestScore = 0;
+  g.mean = sum / size;
+  // Whole-room changes (fluorescent flicker, exposure steps) move the median: subtract it from every reading
+  let seen = 0, med = 0;
+  while (seen + g.all[med] < size / 2) seen += g.all[med++];
+  g.median = med;
+  return g;
+}
+// Mean of the K largest values in a histogram stored at hist[base .. base + 255]
+function topMean(hist, base, K) {
+  let sum = 0, cnt = 0;
+  for (let v = 255; v >= 0 && cnt < K; v--) { const h = hist[base + v]; if (h) { const take = Math.min(h, K - cnt); sum += take * v; cnt += take; } }
+  return cnt ? sum / cnt : 0;
+}
+
+// Auto-aim: split the whole view into a grid and lock onto the cell that looks most like a signal light.
+// Another cell must score 1.5× higher to take over.
+function sampleGrid(t) {
+  const g = readFrame(t);
+  if (!g) return null;
+  g.hist.fill(0);
+  for (let y = 0, k = 0; y < g.H; y++) {
+    const r = g.rowOf[y] * g.cols;
+    for (let x = 0; x < g.W; x++, k++) g.hist[(r + g.colOf[x]) * 256 + g.diff[k]]++;
+  }
+  const K = 12; // a cell's reading = its 12 strongest pixels, so a small light still counts
   for (let c = 0; c < g.vals.length; c++) {
-    let sum = 0, cnt = 0;
-    for (let v = 255, base = c * 256; v >= 0 && cnt < K; v--) { const h = g.hist[base + v]; if (h) { const take = Math.min(h, K - cnt); sum += take * v; cnt += take; } }
-    const val = g.vals[c] = sum / cnt;
+    const val = g.vals[c] = Math.max(0, topMean(g.hist, c * 256, K) - g.median);
     const hs = g.hists[c];
     hs.push({ t, v: val });
     while (hs[0].t < t - 3000) hs.shift();
-    let lo = 255, hi = 0;
-    for (const p of hs) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
-    const score = g.scores[c] = hi - lo;
-    if (score > bestScore) { bestScore = score; best = c; }
   }
-  const current = rx.cell >= 0 ? g.scores[rx.cell] : 0;
-  if (best >= 0 && best !== rx.cell && bestScore >= +$('sens').value && bestScore > current * 1.5) {
-    rx.cell = best;
-    rx.decoder.discard();
-    rx.det.reset();
-    rx.det.win = g.hists[best].slice(0, -1).map(p => ({ t: p.t, v: p.v, on: false }));
-    placeTarget();
+  // Scoring every cell is the slow part and doesn't need to run on every frame
+  if (g.tick++ % 3 === 0) {
+    let best = -1, bestScore = 0;
+    for (let c = 0; c < g.vals.length; c++) {
+      const score = g.scores[c] = blinkScore(g.hists[c]);
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    const current = rx.cell >= 0 ? g.scores[rx.cell] : 0;
+    if (best >= 0 && best !== rx.cell && bestScore >= +$('sens').value && bestScore > current * 1.5) {
+      rx.cell = best;
+      rx.decoder.discard();
+      rx.det.reset();
+      // The lock comes after the first flashes: replay them so the message keeps its first letter
+      for (const p of g.hists[best].slice(0, -1)) detect(p.v, p.t);
+      placeTarget();
+    }
   }
   return rx.cell >= 0 ? g.vals[rx.cell] : null;
 }
 
-// Brightness of the target patch: mean of the brightest 10% of pixels, so a small light still counts
-function sample() {
+// Tap to aim: reading of the box around the chosen spot
+function sampleBox(t) {
+  const g = readFrame(t);
+  if (!g) return null;
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return null;
-  const s = Math.min(vw, vh) * rx.target.size;
-  const sx = clamp(rx.target.x * vw - s / 2, 0, vw - s), sy = clamp(rx.target.y * vh - s / 2, 0, vh - s);
-  sctx.drawImage(video, sx, sy, s, s, 0, 0, N, N);
-  const d = sctx.getImageData(0, 0, N, N).data;
+  const s = Math.min(vw, vh) * rx.target.size * g.W / vw;
+  const x0 = Math.floor(clamp(rx.target.x * g.W - s / 2, 0, g.W - s)), y0 = Math.floor(clamp(rx.target.y * g.H - s / 2, 0, g.H - s));
+  const x1 = Math.min(g.W, x0 + Math.ceil(s)), y1 = Math.min(g.H, y0 + Math.ceil(s));
   const hist = new Uint32Array(256);
-  for (let i = 0; i < d.length; i += 4) hist[(d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8]++;
-  const need = Math.max(1, (N * N * 0.1) | 0);
-  let sum = 0, cnt = 0;
-  for (let v = 255; v >= 0 && cnt < need; v--) { const take = Math.min(hist[v], need - cnt); sum += take * v; cnt += take; }
-  return sum / cnt;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) hist[g.diff[y * g.W + x]]++;
+  return Math.max(0, topMean(hist, 0, Math.max(12, (x1 - x0) * (y1 - y0) * 0.01 | 0)) - g.median);
+}
+
+// Bright room: lower the exposure where the camera allows it. The room darkens, a direct light stays bright.
+function autoExposure(t) {
+  const g = rx.grid, caps = rx.expCaps;
+  if (!g || !caps || $('exp-lock').checked || t - rx.expT < 800) return;
+  rx.expT = t;
+  const step = Math.max(1, caps.step || 0);
+  let c = rx.comp;
+  if (g.mean > 80 && c > caps.min) c = Math.max(caps.min, c - step);
+  else if (g.mean < 30 && c < 0) c = Math.min(0, c + step);
+  else return;
+  rx.comp = c;
+  rx.track.applyConstraints({ advanced: [{ exposureCompensation: c }] }).catch(() => { rx.expCaps = null; });
+}
+function roomLabel() {
+  const g = rx.grid;
+  if (!g) return '–';
+  if (rx.comp < 0) return `Lit ${rx.comp} EV`;
+  return g.mean < 35 ? 'Dark' : 'Lit';
 }
 
 function detect(v, t) {
@@ -745,11 +840,11 @@ function drawGraph(info) {
   gctx.clearRect(0, 0, W, H);
   if (!win.length) return;
   const t1 = win[win.length - 1].t, t0 = t1 - 4000;
-  const x = t => (t - t0) / 4000 * W, y = v => H - 6 - v / 255 * (H - 12);
+  const x = t => (t - t0) / 4000 * W, top = Math.max(60, rx.det.info.hi * 1.1), y = v => H - 6 - Math.min(1, v / top) * (H - 12);
   const css = getComputedStyle(document.documentElement);
   gctx.fillStyle = css.getPropertyValue('--lamp').trim() + '33';
   for (let i = 0; i < win.length - 1; i++) if (win[i].on) gctx.fillRect(x(win[i].t), 0, x(win[i + 1].t) - x(win[i].t) + 1, H);
-  if (info.range >= info.minC) {
+  if (info.active) {
     gctx.strokeStyle = css.getPropertyValue('--muted').trim(); gctx.setLineDash([4, 4]); gctx.lineWidth = 1;
     const th = info.lo + info.range * 0.5;
     gctx.beginPath(); gctx.moveTo(0, y(th)); gctx.lineTo(W, y(th)); gctx.stroke(); gctx.setLineDash([]);
@@ -774,7 +869,9 @@ function renderDecoded() {
 function frame(now, meta) {
   if (!rx.running) return;
   const t = (meta && meta.captureTime) || performance.now();
-  const v = rx.aim === 'auto' ? sampleGrid(t) : sample();
+  const v = rx.aim === 'auto' ? sampleGrid(t) : sampleBox(t);
+  autoExposure(t);
+  $('st-room').textContent = roomLabel();
   if (v === null) {
     rx.decoder.tick(t);
     $('st-sig').textContent = 'searching';
@@ -784,8 +881,9 @@ function frame(now, meta) {
     if (t - rx.fpsT > 1000) { rx.fps = Math.round(rx.frames * 1000 / (t - rx.fpsT)); rx.frames = 0; rx.fpsT = t; }
     targetEl.classList.toggle('on', rx.det.state);
     drawGraph(info);
-    $('st-sig').textContent = info.range < info.minC ? 'none' : rx.det.state ? 'ON' : 'off';
+    $('st-sig').textContent = !info.active ? 'none' : rx.det.state ? 'ON' : 'off';
     $('st-con').textContent = Math.round(info.range);
+    $('st-need').textContent = Math.round(info.clarity * 100) + '%';
     $('st-wpm').textContent = Math.round(1200 / rx.decoder.unit) + ' wpm';
     $('st-fps').textContent = rx.fps + ' fps';
     renderDecoded();
@@ -827,6 +925,9 @@ async function startRx(deviceId) {
   const caps = rx.track.getCapabilities ? rx.track.getCapabilities() : {};
   $('exp-wrap').hidden = !(caps.exposureMode && caps.exposureMode.includes('manual'));
   $('exp-lock').checked = false;
+  const ec = caps.exposureCompensation;
+  rx.expCaps = ec && ec.min < 0 ? ec : null; rx.expT = 0;
+  rx.comp = rx.track.getSettings().exposureCompensation || 0;
   listCameras(rx.track.getSettings().deviceId).catch(() => {});
   rx.running = true; rx.det.reset(); rx.frames = 0; rx.fpsT = performance.now();
   rx.decoder.flush();
@@ -846,7 +947,7 @@ function stopRx() {
   rx.decoder.flush(); rx.lastRender = ''; renderDecoded();
   $('viewer-empty').hidden = false; targetEl.hidden = true; $('hint').hidden = true;
   $('rx-start').disabled = false; $('rx-stop').disabled = true;
-  ['st-sig', 'st-con', 'st-wpm', 'st-fps'].forEach(id => $(id).textContent = '–');
+  ['st-sig', 'st-con', 'st-need', 'st-wpm', 'st-fps', 'st-room'].forEach(id => $(id).textContent = '–');
   gctx.clearRect(0, 0, graph.width, graph.height);
   setStatus(rxStatus, '');
   if (sendRun && $('stop').disabled) keepAwake(false);
